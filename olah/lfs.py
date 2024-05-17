@@ -10,7 +10,9 @@ import pytz
 from olah.constants import CHUNK_SIZE, LFS_FILE_BLOCK, WORKER_API_TIMEOUT
 
 
-async def lfs_get_generator(app, repo_type: str, lfs_url: str, save_path: str, request: Request):
+async def lfs_get_generator(
+    app, repo_type: str, lfs_url: str, save_path: str, request: Request
+):
     headers = {k: v for k, v in request.headers.items()}
     headers.pop("host")
 
@@ -19,18 +21,23 @@ async def lfs_get_generator(app, repo_type: str, lfs_url: str, save_path: str, r
     save_dir = os.path.join(repos_path, f"lfs/{repo_type}s/{save_path}")
     if not os.path.exists(save_dir):
         os.makedirs(save_dir, exist_ok=True)
-    
+
     # lfs meta
     lfs_meta_path = os.path.join(save_dir, "meta.json")
+    print(lfs_meta_path)
     if os.path.exists(lfs_meta_path):
         with open(lfs_meta_path, "r", encoding="utf-8") as f:
             lfs_meta = json.loads(f.read())
     else:
         async with httpx.AsyncClient() as client:
+            params = dict(request.query_params)
+            del params['hf_lfs_url']
+
             async with client.stream(
-                method="GET", url=lfs_url,
+                method="GET",
+                url=lfs_url,
                 headers={"range": "-"},
-                params=request.query_params,
+                params=params,
                 timeout=WORKER_API_TIMEOUT,
             ) as response:
                 file_size = response.headers["content-length"]
@@ -45,7 +52,7 @@ async def lfs_get_generator(app, repo_type: str, lfs_url: str, save_path: str, r
     # range
     file_size = lfs_meta["file_size"]
     if "range" in headers:
-        file_range = headers['range'] # 'bytes=1887436800-'
+        file_range = headers["range"]  # 'bytes=1887436800-'
         if file_range.startswith("bytes="):
             file_range = file_range[6:]
         start_pos, end_pos = file_range.split("-")
@@ -67,7 +74,9 @@ async def lfs_get_generator(app, repo_type: str, lfs_url: str, save_path: str, r
     end_block = end_pos // lfs_file_block
 
     new_headers = lfs_meta["req_headers"]
-    new_headers["date"] = datetime.datetime.now(pytz.timezone('GMT')).strftime('%a, %d %b %Y %H:%M:%S %Z')
+    new_headers["date"] = datetime.datetime.now(pytz.timezone("GMT")).strftime(
+        "%a, %d %b %Y %H:%M:%S %Z"
+    )
     new_headers["content-length"] = str(end_pos - start_pos)
 
     yield new_headers
@@ -90,17 +99,22 @@ async def lfs_get_generator(app, repo_type: str, lfs_url: str, save_path: str, r
                         break
 
                     chunk = raw_chunk
-                    if cur_pos >= sub_chunk_start_pos and cur_pos < sub_chunk_start_pos + len(raw_chunk):
-                        chunk = chunk[cur_pos - sub_chunk_start_pos:]
+                    if (
+                        cur_pos >= sub_chunk_start_pos
+                        and cur_pos < sub_chunk_start_pos + len(raw_chunk)
+                    ):
+                        chunk = chunk[cur_pos - sub_chunk_start_pos :]
                     elif cur_pos >= sub_chunk_start_pos + len(raw_chunk):
                         chunk = bytes([])
                     elif cur_pos < sub_chunk_start_pos:
                         pass
 
                     if cur_pos + len(chunk) > block_end_pos:
-                        chunk = chunk[:-(cur_pos + len(chunk) - block_end_pos)]
-                        print("Warning: This maybe a bug, sending chunk is larger than content length.")
-                    
+                        chunk = chunk[: -(cur_pos + len(chunk) - block_end_pos)]
+                        print(
+                            "Warning: This maybe a bug, sending chunk is larger than content length."
+                        )
+
                     if len(chunk) != 0:
                         yield chunk
                     cur_pos += len(chunk)
@@ -109,10 +123,15 @@ async def lfs_get_generator(app, repo_type: str, lfs_url: str, save_path: str, r
             try:
                 temp_file_path = None
                 async with httpx.AsyncClient() as client:
-                    with tempfile.NamedTemporaryFile(mode="wb", delete=False) as temp_file:
-                        headers["range"] = f"bytes={block_start_pos}-{block_end_pos - 1}"
+                    with tempfile.NamedTemporaryFile(
+                        mode="wb", delete=False
+                    ) as temp_file:
+                        headers["range"] = (
+                            f"bytes={block_start_pos}-{block_end_pos - 1}"
+                        )
                         async with client.stream(
-                            method="GET", url=lfs_url,
+                            method="GET",
+                            url=lfs_url,
                             headers=headers,
                             params=request.query_params,
                             timeout=WORKER_API_TIMEOUT,
@@ -125,17 +144,26 @@ async def lfs_get_generator(app, repo_type: str, lfs_url: str, save_path: str, r
                                 temp_file.write(raw_chunk)
 
                                 stream_chunk = raw_chunk
-                                
-                                if cur_pos > sub_chunk_start_pos and cur_pos < sub_chunk_start_pos + len(raw_chunk):
-                                    stream_chunk = stream_chunk[cur_pos - sub_chunk_start_pos:]
+
+                                if (
+                                    cur_pos > sub_chunk_start_pos
+                                    and cur_pos < sub_chunk_start_pos + len(raw_chunk)
+                                ):
+                                    stream_chunk = stream_chunk[
+                                        cur_pos - sub_chunk_start_pos :
+                                    ]
                                 elif cur_pos >= sub_chunk_start_pos + len(raw_chunk):
                                     stream_chunk = bytes([])
                                 elif cur_pos < sub_chunk_start_pos:
                                     pass
 
                                 if cur_pos + len(stream_chunk) > block_end_pos:
-                                    stream_chunk = stream_chunk[:-(cur_pos + len(stream_chunk) - block_end_pos)]
-                                    print("Warning: This maybe a bug, sending chunk is larger than content length.")
+                                    stream_chunk = stream_chunk[
+                                        : -(cur_pos + len(stream_chunk) - block_end_pos)
+                                    ]
+                                    print(
+                                        "Warning: This maybe a bug, sending chunk is larger than content length."
+                                    )
 
                                 if len(stream_chunk) != 0:
                                     yield stream_chunk

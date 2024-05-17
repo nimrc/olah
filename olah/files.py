@@ -1,6 +1,6 @@
-
 import json
 import os
+import re
 import shutil
 import tempfile
 from typing import Literal
@@ -11,26 +11,45 @@ import httpx
 from olah.constants import CHUNK_SIZE, WORKER_API_TIMEOUT
 from olah.utls import check_cache_rules_hf
 
-async def file_head_generator(app, repo_type: Literal["model", "dataset"], org: str, repo: str, commit: str, file_path: str, request: Request):
+
+async def file_head_generator(
+    app,
+    repo_type: Literal["model", "dataset"],
+    org: str,
+    repo: str,
+    commit: str,
+    file_path: str,
+    request: Request,
+):
     headers = {k: v for k, v in request.headers.items()}
+    headers["Authorization"] = app.app_settings.hf_token
     headers.pop("host")
 
     # save
     repos_path = app.app_settings.repos_path
-    save_path = os.path.join(repos_path, f"heads/{repo_type}s/{org}/{repo}/resolve_head/{commit}/{file_path}")
+    save_path = os.path.join(
+        repos_path, f"heads/{repo_type}s/{org}/{repo}/resolve_head/{commit}/{file_path}"
+    )
     save_dir = os.path.dirname(save_path)
     if not os.path.exists(save_dir):
         os.makedirs(save_dir, exist_ok=True)
-    
+
     use_cache = os.path.exists(save_path)
     allow_cache = await check_cache_rules_hf(app, repo_type, org, repo)
+
+    def new_location(location) -> str:
+        hf_lfs_url = re.match(app.app_settings.hf_lfs_pattern, location).group()
+
+        return re.sub(app.app_settings.hf_lfs_pattern, app.app_settings.mirror_lfs_url,
+                      location) + f'&hf_lfs_url={hf_lfs_url}'
 
     # proxy
     if use_cache:
         with open(save_path, "r", encoding="utf-8") as f:
             response_headers = json.loads(f.read())
             if "location" in response_headers:
-                response_headers["location"] = response_headers["location"].replace(app.app_settings.hf_lfs_url, app.app_settings.mirror_lfs_url)
+                response_headers["location"] = new_location(response_headers["location"])
+
             yield response_headers
     else:
         if repo_type == "model":
@@ -39,7 +58,8 @@ async def file_head_generator(app, repo_type: Literal["model", "dataset"], org: 
             url = f"{app.app_settings.hf_url}/{repo_type}s/{org}/{repo}/resolve/{commit}/{file_path}"
         async with httpx.AsyncClient() as client:
             async with client.stream(
-                method="HEAD", url=url,
+                method="HEAD",
+                url=url,
                 headers=headers,
                 timeout=WORKER_API_TIMEOUT,
             ) as response:
@@ -49,25 +69,36 @@ async def file_head_generator(app, repo_type: Literal["model", "dataset"], org: 
                     with open(save_path, "w", encoding="utf-8") as f:
                         f.write(json.dumps(response_headers, ensure_ascii=False))
                 if "location" in response_headers:
-                    response_headers["location"] = response_headers["location"].replace(app.app_settings.hf_lfs_url, app.app_settings.mirror_lfs_url)
+                    response_headers["location"] = new_location(response_headers["location"])
                 yield response_headers
-                
+
                 async for raw_chunk in response.aiter_raw():
                     if not raw_chunk:
-                        continue 
+                        continue
                     yield raw_chunk
 
 
-async def file_get_generator(app, repo_type: Literal["model", "dataset"], org: str, repo: str, commit: str, file_path: str, request: Request):
+async def file_get_generator(
+    app,
+    repo_type: Literal["model", "dataset"],
+    org: str,
+    repo: str,
+    commit: str,
+    file_path: str,
+    request: Request,
+):
     headers = {k: v for k, v in request.headers.items()}
+    headers["Authorization"] = app.app_settings.hf_token
     headers.pop("host")
     # save
     repos_path = app.app_settings.repos_path
-    save_path = os.path.join(repos_path, f"files/{repo_type}s/{org}/{repo}/resolve/{commit}/{file_path}")
+    save_path = os.path.join(
+        repos_path, f"files/{repo_type}s/{org}/{repo}/resolve/{commit}/{file_path}"
+    )
     save_dir = os.path.dirname(save_path)
     if not os.path.exists(save_dir):
         os.makedirs(save_dir, exist_ok=True)
-    
+
     use_cache = os.path.exists(save_path)
     allow_cache = await check_cache_rules_hf(app, repo_type, org, repo)
 
@@ -90,9 +121,10 @@ async def file_get_generator(app, repo_type: Literal["model", "dataset"], org: s
             async with httpx.AsyncClient() as client:
                 with tempfile.NamedTemporaryFile(mode="wb", delete=False) as temp_file:
                     if not allow_cache:
-                        temp_file = open(os.devnull, 'wb')
+                        temp_file = open(os.devnull, "wb")
                     async with client.stream(
-                        method="GET", url=url,
+                        method="GET",
+                        url=url,
                         headers=headers,
                         timeout=WORKER_API_TIMEOUT,
                     ) as response:

@@ -2,6 +2,7 @@ import datetime
 import json
 import os
 import argparse
+import re
 import tempfile
 import shutil
 from typing import Annotated, Union
@@ -13,9 +14,15 @@ from olah.configs import OlahConfig
 from olah.files import file_get_generator, file_head_generator
 from olah.lfs import lfs_get_generator
 from olah.meta import meta_generator
-from olah.utls import check_proxy_rules_hf, check_commit_hf, get_commit_hf, get_newest_commit_hf
+from olah.utls import (
+    check_proxy_rules_hf,
+    check_commit_hf,
+    get_commit_hf,
+    get_newest_commit_hf,
+)
 
 app = FastAPI(debug=False)
+
 
 class AppSettings(BaseSettings):
     # The address of the model controller.
@@ -23,13 +30,22 @@ class AppSettings(BaseSettings):
     repos_path: str = "./repos"
     hf_url: str = "https://huggingface.co"
     hf_lfs_url: str = "https://cdn-lfs.huggingface.co"
-    mirror_url: str = "http://localhost:8090"
-    mirror_lfs_url: str = "http://localhost:8090"
+    hf_lfs_pattern: str = "https://.+lfs.+huggingface.co"
+    mirror_url: str = "http://172.16.8.120:8090"
+    mirror_lfs_url: str = "http://172.16.8.120:8090"
+    offline: bool = False
+
+    hf_token: str = ""
+
 
 @app.get("/api/{repo_type}s/{org}/{repo}")
 async def meta_proxy(repo_type: str, org: str, repo: str, request: Request):
+    app.app_settings.hf_token = request.headers.get("Authorization")
+
     if not await check_proxy_rules_hf(app, repo_type, org, repo):
-        return Response(content="This repository is forbidden by the mirror.", status_code=403)
+        return Response(
+            content="This repository is forbidden by the mirror.", status_code=403
+        )
     if not await check_commit_hf(app, repo_type, org, repo, None):
         return Response(content="This repository is not accessible.", status_code=404)
     new_commit = await get_newest_commit_hf(app, repo_type, org, repo)
@@ -37,51 +53,101 @@ async def meta_proxy(repo_type: str, org: str, repo: str, request: Request):
     headers = await generator.__anext__()
     return StreamingResponse(generator, headers=headers)
 
+
 @app.get("/api/{repo_type}s/{org}/{repo}/revision/{commit}")
-async def meta_proxy(repo_type: str, org: str, repo: str, commit: str, request: Request):
+async def meta_proxy(
+    repo_type: str, org: str, repo: str, commit: str, request: Request
+):
+    app.app_settings.hf_token = request.headers.get("Authorization")
+
     if not await check_proxy_rules_hf(app, repo_type, org, repo):
-        return Response(content="This repository is forbidden by the mirror. ", status_code=403)
+        return Response(
+            content="This repository is forbidden by the mirror. ", status_code=403
+        )
     if not await check_commit_hf(app, repo_type, org, repo, commit):
         return Response(content="This repository is not accessible. ", status_code=404)
     generator = meta_generator(app, repo_type, org, repo, commit, request)
     headers = await generator.__anext__()
     return StreamingResponse(generator, headers=headers)
 
+
 @app.head("/{repo_type}s/{org}/{repo}/resolve/{commit}/{file_path:path}")
 @app.head("/{org}/{repo}/resolve/{commit}/{file_path:path}")
-async def file_head_proxy(org: str, repo: str, commit: str, file_path: str, request: Request, repo_type: str = "model"):
+async def file_head_proxy(
+    org: str,
+    repo: str,
+    commit: str,
+    file_path: str,
+    request: Request,
+    repo_type: str = "model",
+):
+    app.app_settings.hf_token = request.headers.get("Authorization")
+
     if not await check_proxy_rules_hf(app, repo_type, org, repo):
-        return Response(content="This repository is forbidden by the mirror. ", status_code=403)
+        return Response(
+            content="This repository is forbidden by the mirror. ", status_code=403
+        )
     if not await check_commit_hf(app, repo_type, org, repo, commit):
         return Response(content="This repository is not accessible. ", status_code=404)
     commit_sha = await get_commit_hf(app, repo_type, org, repo, commit)
-    generator = file_head_generator(app, repo_type, org, repo, commit_sha, file_path, request)
+    generator = file_head_generator(
+        app, repo_type, org, repo, commit_sha, file_path, request
+    )
     headers = await generator.__anext__()
-    return StreamingResponse(generator, headers=headers)
+    status_code = 404 if headers.get('x-error-code') == 'EntryNotFound' else 200
+
+    return StreamingResponse(generator, headers=headers, status_code=status_code)
+
 
 @app.get("/{repo_type}s/{org}/{repo}/resolve/{commit}/{file_path:path}")
 @app.get("/{org}/{repo}/resolve/{commit}/{file_path:path}")
-async def file_proxy(org: str, repo: str, commit: str, file_path: str, request: Request, repo_type: str = "model"):
+async def file_proxy(
+    org: str,
+    repo: str,
+    commit: str,
+    file_path: str,
+    request: Request,
+    repo_type: str = "model",
+):
+    app.app_settings.hf_token = request.headers.get("Authorization")
+
     if not await check_proxy_rules_hf(app, repo_type, org, repo):
-        return Response(content="This repository is forbidden by the mirror. ", status_code=403)
+        return Response(
+            content="This repository is forbidden by the mirror. ", status_code=403
+        )
     if not await check_commit_hf(app, repo_type, org, repo, commit):
         return Response(content="This repository is not accessible. ", status_code=404)
     commit_sha = await get_commit_hf(app, repo_type, org, repo, commit)
-    generator = file_get_generator(app, repo_type, org, repo, commit_sha, file_path, request)
+    generator = file_get_generator(
+        app, repo_type, org, repo, commit_sha, file_path, request
+    )
     headers = await generator.__anext__()
     return StreamingResponse(generator, headers=headers)
 
+
 @app.get("/repos/{dir1}/{dir2}/{hash_repo}/{hash_file}")
-async def lfs_proxy(dir1: str, dir2: str, hash_repo: str, hash_file: str, request: Request):
+async def lfs_proxy(
+    dir1: str, dir2: str, hash_repo: str, hash_file: str, request: Request
+):
+    app.app_settings.hf_token = request.headers.get("Authorization")
+    app.app_settings.hf_lfs_url = request.query_params.get("hf_lfs_url")
+
     repo_type = "model"
-    lfs_url = f"{app.app_settings.hf_lfs_url}/repos/{dir1}/{dir2}/{hash_repo}/{hash_file}"
+    lfs_url = (
+        f"{app.app_settings.hf_lfs_url}/repos/{dir1}/{dir2}/{hash_repo}/{hash_file}"
+    )
+    print("LFS-URL: ", lfs_url)
     save_path = f"{dir1}/{dir2}/{hash_repo}/{hash_file}"
     generator = lfs_get_generator(app, repo_type, lfs_url, save_path, request)
     headers = await generator.__anext__()
     return StreamingResponse(generator, headers=headers)
 
+
 @app.get("/datasets/hendrycks_test/{hash_file}")
 async def lfs_proxy(hash_file: str, request: Request):
+    app.app_settings.hf_token = request.headers.get("Authorization")
+    app.app_settings.hf_lfs_url = request.query_params.get("hf_lfs_url")
+
     repo_type = "dataset"
     lfs_url = f"{app.app_settings.hf_lfs_url}/datasets/hendrycks_test/{hash_file}"
     save_path = f"hendrycks_test/{hash_file}"
@@ -89,16 +155,20 @@ async def lfs_proxy(hash_file: str, request: Request):
     headers = await generator.__anext__()
     return StreamingResponse(generator, headers=headers)
 
+
 @app.get("/", response_class=HTMLResponse)
 async def index():
-    with open(os.path.join(os.path.dirname(__file__), "../static/index.html"), "r", encoding="utf-8") as f:
+    with open(
+        os.path.join(os.path.dirname(__file__), "../static/index.html"),
+        "r",
+        encoding="utf-8",
+    ) as f:
         page = f.read()
     return page
 
+
 if __name__ in ["__main__", "olah.server"]:
-    parser = argparse.ArgumentParser(
-        description="Olah Huggingface Mirror Server."
-    )
+    parser = argparse.ArgumentParser(description="Olah Huggingface Mirror Server.")
     parser.add_argument("--config", "-c", type=str, default="")
     parser.add_argument("--host", type=str, default="localhost")
     parser.add_argument("--port", type=int, default=8090)
@@ -106,11 +176,14 @@ if __name__ in ["__main__", "olah.server"]:
     parser.add_argument("--ssl-cert", type=str, default=None)
     parser.add_argument("--repos-path", type=str, default="./repos")
     parser.add_argument("--hf-url", type=str, default="https://huggingface.co")
-    parser.add_argument("--hf-lfs-url", type=str, default="https://cdn-lfs.huggingface.co")
+    parser.add_argument(
+        "--hf-lfs-url", type=str, default="https://cdn-lfs.huggingface.co"
+    )
     parser.add_argument("--mirror-url", type=str, default="http://localhost:8090")
     parser.add_argument("--mirror-lfs-url", type=str, default="http://localhost:8090")
     args = parser.parse_args()
-    
+
+
     def is_default_value(args, arg_name):
         if hasattr(args, arg_name):
             arg_value = getattr(args, arg_name)
@@ -118,11 +191,12 @@ if __name__ in ["__main__", "olah.server"]:
             return arg_value == arg_default
         return False
 
+
     if args.config != "":
         config = OlahConfig(args.config)
     else:
         config = OlahConfig()
-    
+
     if is_default_value(args, "host"):
         args.host = config.host
     if is_default_value(args, "port"):
@@ -152,6 +226,7 @@ if __name__ in ["__main__", "olah.server"]:
     )
 
     import uvicorn
+
     if __name__ == "__main__":
         uvicorn.run(
             "olah.server:app",
@@ -160,5 +235,5 @@ if __name__ in ["__main__", "olah.server"]:
             log_level="info",
             reload=False,
             ssl_keyfile=args.ssl_key,
-            ssl_certfile=args.ssl_cert
+            ssl_certfile=args.ssl_cert,
         )
